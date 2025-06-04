@@ -40,54 +40,63 @@ def setup_driver():
     
     try:
         options = uc.ChromeOptions()
-        
-        # Recommended to run in non-headless for login processes
-        # options.add_argument("--headless=new")
-        
+
+        # ✅ Enable headless mode for Render or server environments
+        options.add_argument("--headless=new")
+
         options.add_argument("--no-sandbox")
         options.add_argument("--disable-gpu")
         options.add_argument("--disable-dev-shm-usage")
         options.add_argument("--disable-blink-features=AutomationControlled")
         options.add_argument("--start-maximized")
         options.add_argument("--window-size=1920,1080")
-        
+
         # Set a common user agent
         user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
         options.add_argument(f'user-agent={user_agent}')
-        
+
         driver = uc.Chrome(options=options)
-        
+
         # Remove navigator.webdriver flag
         driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
-        
+
         return driver
     except Exception as e:
         print(f"⚠️ Failed to setup driver: {str(e)}")
         send_telegram_alert("⚠️ Failed to setup Chrome driver! Check dependencies.")
         raise
 
+
 def handle_cookie_consent(driver):
-    """Handle the cookie consent popup by declining non-essential cookies"""
+    """Try to decline cookies using a robust approach."""
     try:
+        print("🍪 Searching for cookie consent...")
+
+        # Wait until a button with 'Decline' appears (more generic search)
         decline_button = WebDriverWait(driver, 15).until(
-            EC.element_to_be_clickable((By.XPATH, 
-                "//button[contains(@class, 'border-primary')]//p[contains(text(), 'Decline all')]/.."))
+            EC.element_to_be_clickable((By.XPATH,
+                "//button[.//p[contains(translate(text(), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'decline all')] or contains(translate(text(), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'decline')]"))
         )
-        
+
         driver.execute_script("arguments[0].scrollIntoView({behavior: 'smooth', block: 'center'});", decline_button)
-        human_like_delay(0.5, 1.5)
-        driver.execute_script("arguments[0].click();", decline_button)
-        
-        print("🍪 Declined non-essential cookies")
+        human_like_delay(0.5, 1.2)
+
+        try:
+            decline_button.click()
+        except Exception:
+            driver.execute_script("arguments[0].click();", decline_button)
+
+        print("✅ Declined cookies.")
         human_like_delay(1, 2)
         return True
-        
+
     except TimeoutException:
-        print("ℹ️ Cookie consent popup didn't appear")
+        print("ℹ️ No cookie popup detected.")
         return False
     except Exception as e:
-        print(f"⚠️ Cookie consent error: {str(e)}")
+        print(f"⚠️ Cookie consent handling failed: {str(e)}")
         return False
+
 
 def login(driver):
     """Perform login with provided credentials"""
@@ -140,46 +149,57 @@ def login(driver):
         driver.save_screenshot("login_error.png")
         send_telegram_alert(f"⚠️ Login failed: {str(e)}")
         return False
+def load_last_status():
+    try:
+        with open("status.txt", "r") as f:
+            return f.read().strip()
+    except:
+        return None
+
+def save_last_status(status):
+    try:
+        with open("status.txt", "w") as f:
+            f.write(status)
+    except Exception as e:
+        print(f"⚠️ Couldn't save status: {e}")
 
 def check_availability(driver):
-    """Check ticket availability and send appropriate alerts"""
     global last_status
-    
+
     try:
-        # Wait for page to fully load
         WebDriverWait(driver, 30).until(
-            EC.presence_of_element_located((By.TAG_NAME, "body")) and
-            EC.invisibility_of_element_located((By.CSS_SELECTOR, ".loader, .spinner"))
+            EC.presence_of_element_located((By.TAG_NAME, "body"))
         )
-        
-        # Save page source for debugging
+
         with open("snapshot.html", "w", encoding="utf-8") as f:
             f.write(driver.page_source)
-        
-        # Check for sold out message (case insensitive)
-        sold_out = "sold out" in driver.page_source.lower()
-        
-        if sold_out:
+
+        page_content = driver.page_source.lower()
+        sold_out = "sold out" in page_content or "officially sold out" in page_content
+
+        current_status = "sold_out" if sold_out else "available"
+        print(f"🔍 Current ticket status: {current_status}")
+
+        # Save the current status (optional, in case you want to restore in future runs)
+        save_last_status(current_status)
+        last_status = current_status
+
+        if current_status == "sold_out":
             print("❌ Tickets are sold out")
-            current_status = "sold_out"
-            if last_status != current_status:
-                send_telegram_alert("🚫 All tickets are currently sold out. I'll keep checking...")
-                last_status = current_status
+            send_telegram_alert("🚫 All tickets are currently sold out. Still watching...")
         else:
             print("🎯 Tickets may be available!")
-            current_status = "available"
-            if last_status != current_status:
-                driver.save_screenshot("available.png")
-                send_telegram_alert(f"🎟️ TICKETS MAY BE AVAILABLE!\n{URL}\nCheck attached screenshot!")
-                last_status = current_status
-                
+            driver.save_screenshot("available.png")
+            send_telegram_alert(f"🎟️ TICKETS MAY BE AVAILABLE!\n{URL}\nCheck attached screenshot!")
+
         return True
-        
+
     except Exception as e:
         print(f"⚠️ Availability check error: {str(e)}")
         driver.save_screenshot("availability_error.png")
         send_telegram_alert(f"⚠️ Failed to check availability: {str(e)}")
         return False
+
 
 def check_ticket():
     global last_status
@@ -234,10 +254,12 @@ def check_ticket():
 if __name__ == "__main__":
     print("Starting ticket monitoring...")
     send_telegram_alert("🔔 Ticket monitor started running!")
-    
+
+    last_status = load_last_status()  # ✅ Load once globally
+
     while True:
         check_ticket()
-        # Random delay between 2-5 minutes
         delay = random.randint(120, 300)
         print(f"⏳ Next check in {delay//60}m {delay%60}s...")
         time.sleep(delay)
+        print("🔄 Restarting check loop...")
